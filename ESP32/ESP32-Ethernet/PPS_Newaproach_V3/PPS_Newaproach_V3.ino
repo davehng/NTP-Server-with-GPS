@@ -42,7 +42,7 @@ HardwareSerial gpsSerial(1);
 
 // Baud rate for GPS and correction factor for time update
 #define GPSBaud 38400
-#define CORRECTION_FACTOR 1410
+#define CORRECTION_FACTOR 1210
 
 #define EEPROM_SIZE 1
 
