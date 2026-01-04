@@ -43,7 +43,7 @@ HardwareSerial gpsSerial(1);
 
 // Baud rate for GPS and correction factor for time update
 #define GPSBaud 38400
-#define CORRECTION_FACTOR 23435 // 0 - offset: -0.935388 sec, 503900: - offset -0.416567, 939177 - offset: -0.013611, 952788 - offset: 
+#define CORRECTION_FACTOR 140
 
 #define EEPROM_SIZE 1
 
@@ -394,7 +394,7 @@ void gpsTask(void *parameter) {
 void ntpTask(void *parameter) {
   while (1) {
     handleNTPRequest();
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
@@ -411,8 +411,8 @@ void setup() {
   initGPS();
   DEBUG_PRINTLN("----- start: starting tasks -----");
   gpsMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 3, NULL, 1);
   DEBUG_PRINTLN("----- start: end of start -----");
 }
 
