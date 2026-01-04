@@ -1,0 +1,47 @@
+# Ignore build artifacts
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.eep
+*.map
+*.sym
+*.lss
+
+# Ignore Arduino IDE files
+*.ino.*
+*.cpp.*
+*.h.*
+*.log
+*.bak
+
+# Ignore backup and temporary files
+*.tmp
+*.swp
+*.swo
+*.~*
+
+# Ignore OS-specific files
+DS_Store
+Thumbs.db
+
+# Ignore compiled libraries
+libraries/*/build/
+
+# Ignore board-specific files
+hardware/*/bootloaders/*.o
+hardware/*/bootloaders/*.lst
+hardware/*/bootloaders/*.map
+hardware/*/bootloaders/*.sym
+hardware/*/bootloaders/*.elf
+hardware/*/bootloaders/*.eep
+
+# Ignore IDE-specific files
+idea/
+*.iml
+vscode/
+
+# Ignore credential files
+credentials.h
+
