@@ -37,12 +37,13 @@ WiFiUDP udp;
 
 volatile bool PPSsignal = false;
 volatile bool PPSavailable = false;
+volatile uint32_t lastPPSMicros = 0;
 
 HardwareSerial gpsSerial(1);
 
 // Baud rate for GPS and correction factor for time update
 #define GPSBaud 38400
-#define CORRECTION_FACTOR 952788    // 0 - offset: -0.935388 sec, 503900: - offset -0.416567, 939177 - offset: -0.013611, 952788 - offset: 
+#define CORRECTION_FACTOR 23435 // 0 - offset: -0.935388 sec, 503900: - offset -0.416567, 939177 - offset: -0.013611, 952788 - offset: 
 
 #define EEPROM_SIZE 1
 
@@ -210,6 +211,7 @@ void printMacAddress() {
 
 // PPS Interrupt Service Routine
 void IRAM_ATTR PPS_ISR() {
+  lastPPSMicros = micros();
   PPSsignal = true;
 }
 
@@ -290,7 +292,10 @@ void readGPSTime() {
   while (gpsSerial.available()) {
     gps.encode(gpsSerial.read());
   }
+
   if (gps.time.isValid() && gps.date.isValid()) {
+    PPSsignal = false;
+
     struct tm timeinfo = { 0 };
     timeinfo.tm_year = gps.date.year() - 1900;
     timeinfo.tm_mon = gps.date.month() - 1;
@@ -298,20 +303,17 @@ void readGPSTime() {
     timeinfo.tm_hour = gps.time.hour();
     timeinfo.tm_min = gps.time.minute();
     timeinfo.tm_sec = gps.time.second();
-    time_t unixTime = mktime(&timeinfo) + 1;
+
+    time_t unixTime = mktime(&timeinfo);
     struct timeval tv;
     tv.tv_sec = unixTime;
-    tv.tv_usec = CORRECTION_FACTOR;
 
-    // If PPS is available, wait for the next PPS signal for precise synchronization.
-    if (PPSavailable) {
-      while (!PPSsignal) {
-        // this must be terrible for tying up the esp32's resources, can we yield or do something else here?
-      }
-      PPSsignal = false;
-    }
+    uint32_t nowMicros = micros();
+    uint32_t microsecondsSincePulse = nowMicros - lastPPSMicros;
+    tv.tv_usec = microsecondsSincePulse + CORRECTION_FACTOR;
 
     settimeofday(&tv, NULL);
+
     DEBUG_CRITICAL_PRINTLN("GPS Time Updated");
   }
 }
@@ -319,11 +321,13 @@ void readGPSTime() {
 void handleNTPRequest() {
   int packetSize = udp.parsePacket();
   if (packetSize >= 48) {  // NTP packets are 48 bytes long
+    // capture time immediately
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+
     uint8_t requestBuffer[48];
     uint8_t responseBuffer[48];
     udp.read(requestBuffer, 48);
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
     uint32_t recvSec = tv.tv_sec + 2208988800UL;
     uint32_t recvFrac = (uint32_t)((double)tv.tv_usec * (4294967296.0 / 1000000.0));
     responseBuffer[0] = 0x24;              // LI=0, VN=4, Mode=4 (server)
