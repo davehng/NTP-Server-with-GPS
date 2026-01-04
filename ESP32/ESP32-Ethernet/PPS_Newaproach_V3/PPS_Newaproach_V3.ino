@@ -35,7 +35,6 @@ TinyGPSPlus gps;
 SemaphoreHandle_t gpsMutex;
 WiFiUDP udp;
 
-volatile bool PPSsignal = false;
 volatile bool PPSavailable = false;
 volatile uint32_t lastPPSMicros = 0;
 
@@ -43,7 +42,7 @@ HardwareSerial gpsSerial(1);
 
 // Baud rate for GPS and correction factor for time update
 #define GPSBaud 38400
-#define CORRECTION_FACTOR 140
+#define CORRECTION_FACTOR 1410
 
 #define EEPROM_SIZE 1
 
@@ -212,7 +211,6 @@ void printMacAddress() {
 // PPS Interrupt Service Routine
 void IRAM_ATTR PPS_ISR() {
   lastPPSMicros = micros();
-  PPSsignal = true;
 }
 
 void initPPS() {
@@ -289,12 +287,30 @@ void initGPS() {
 }
 
 void readGPSTime() {
+  // copy lastPPSMicros as soon as we can in case the PPS ISR runs while we are still running this task
+  uint32_t local_lastPPSMicros = lastPPSMicros;
+  uint32_t nowMicros = micros();
+
   while (gpsSerial.available()) {
     gps.encode(gpsSerial.read());
   }
 
-  if (gps.time.isValid() && gps.date.isValid()) {
-    PPSsignal = false;
+  if (gps.time.isUpdated() && gps.time.isValid() && gps.date.isValid()) {
+    // Calculate how long ago the PPS pulse occurred
+    uint32_t microsecondsSincePulse = nowMicros - local_lastPPSMicros;
+
+    /**
+     * SANITY CHECK: The "One-Second" Guard
+     * GPS sentences usually arrive 200-500ms AFTER the PPS pulse.
+     * If microsecondsSincePulse is very large (e.g., > 900ms), we are likely 
+     * looking at an old PPS pulse from the PREVIOUS second. 
+     * If it's very small (e.g., < 10ms), the PPS for the NEXT second 
+     * might have just fired before we parsed the data for the current second.
+     */
+    if (microsecondsSincePulse > 900000 || microsecondsSincePulse < 1000) {
+      DEBUG_CRITICAL_PRINTLN("Sync window missed - skipping this cycle to prevent 1s offset");
+      return;
+    }    
 
     struct tm timeinfo = { 0 };
     timeinfo.tm_year = gps.date.year() - 1900;
@@ -304,17 +320,25 @@ void readGPSTime() {
     timeinfo.tm_min = gps.time.minute();
     timeinfo.tm_sec = gps.time.second();
 
-    time_t unixTime = mktime(&timeinfo);
-    struct timeval tv;
-    tv.tv_sec = unixTime;
+    uint32_t totalUsec = microsecondsSincePulse + CORRECTION_FACTOR;
 
-    uint32_t nowMicros = micros();
-    uint32_t microsecondsSincePulse = nowMicros - lastPPSMicros;
-    tv.tv_usec = microsecondsSincePulse + CORRECTION_FACTOR;
+    struct timeval tv;
+    tv.tv_sec = mktime(&timeinfo);
+
+    // Check for overflow of totalUsec: greater than or equal to 1 second
+    if (totalUsec >= 1000000) {
+        tv.tv_sec += (totalUsec / 1000000); // Add whole seconds to the seconds field
+        tv.tv_usec = (totalUsec % 1000000); // Keep only the remaining microseconds
+    } else {
+        tv.tv_usec = totalUsec;
+    }
 
     settimeofday(&tv, NULL);
 
-    DEBUG_CRITICAL_PRINTLN("GPS Time Updated");
+    DEBUG_CRITICAL_PRINT("GPS sync: ");
+    DEBUG_CRITICAL_PRINT(tv.tv_sec);
+    DEBUG_CRITICAL_PRINT(".");
+    DEBUG_CRITICAL_PRINT(tv.tv_usec);
   }
 }
 
@@ -411,8 +435,8 @@ void setup() {
   initGPS();
   DEBUG_PRINTLN("----- start: starting tasks -----");
   gpsMutex = xSemaphoreCreateMutex();
-  xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 2, NULL, 1);    // run on core 1 (away from network) at a higher priority than maintenance tasks
+  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 3, NULL, 0);    // run on core 0 at a higher priority than maintenance tasks
   DEBUG_PRINTLN("----- start: end of start -----");
 }
 
