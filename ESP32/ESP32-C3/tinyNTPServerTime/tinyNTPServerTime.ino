@@ -44,8 +44,8 @@ SemaphoreHandle_t gpsMutex;
 volatile bool PPSsignal    = false;
 volatile bool PPSavailable = false;
 
-#define GPSBaud           9600
-#define CORRECTION_FACTOR 0
+#define GPSBaud           38400
+#define CORRECTION_FACTOR 503900    // 0 - offset -0.935388 sec, 
 
 // —————— OLED Setup ——————
 const int xOffset = 30;  // center 72px window horizontally
@@ -69,9 +69,9 @@ void displayTime() {
            timeinfo.tm_min,
            timeinfo.tm_sec);
   snprintf(line2, sizeof(line2), "%02d-%02d-%02d",
-           timeinfo.tm_year % 100,
+           timeinfo.tm_mday,
            timeinfo.tm_mon + 1,
-           timeinfo.tm_mday);
+           timeinfo.tm_year % 100);
 
   uint8_t fh      = u8g2.getMaxCharHeight(); // ~10px
   uint8_t spacing = 2;
@@ -165,11 +165,11 @@ void readGPSTime() {
     ti.tm_min  = gps.time.minute();
     ti.tm_sec  = gps.time.second();
     time_t unixTime = mktime(&ti) + 1;
+    struct timeval tv = { .tv_sec = unixTime, .tv_usec = CORRECTION_FACTOR };
     if (PPSavailable) {
       while (!PPSsignal) {}
       PPSsignal = false;
     }
-    struct timeval tv = { .tv_sec = unixTime, .tv_usec = CORRECTION_FACTOR };
     settimeofday(&tv, NULL);
     DEBUG_CRITICAL_PRINTLN("GPS time updated");
   }
@@ -237,10 +237,18 @@ void gpsTask(void *param) {
   u8g2.setFont(u8g2_font_6x10_tr);
   u8g2.setFontPosTop();
 
+  int count = 0;
+
   for (;;) {
     readGPSTime();
-    displayTime();              // show synced time instead of lat/lon
-    vTaskDelay(pdMS_TO_TICKS(500));
+
+    count++;
+    if (count % 10 == 0) {
+      displayTime();              // show synced time instead of lat/lon
+      count = 0;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -253,10 +261,16 @@ void ntpTask(void *param) {
 
 void setup() {
   Serial.begin(115200);
+  DEBUG_PRINTLN("----- start, delaying 5000 msec -----");
+  delay(5000);
+  DEBUG_PRINTLN("----- start, network -----");
   initNetwork();
   printMacAddress();
+  DEBUG_PRINTLN("----- start, pps  -----");
   initPPS();
+  DEBUG_PRINTLN("----- start, gps -----");
   initGPS();
+  DEBUG_PRINTLN("----- start, tasks init -----");
 
   gpsMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 1, NULL, 0);
@@ -265,4 +279,5 @@ void setup() {
 
 void loop() {
   // everything handled in tasks
+    delay(10);
 }
