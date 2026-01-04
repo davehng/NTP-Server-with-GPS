@@ -41,8 +41,8 @@ volatile bool PPSavailable = false;
 HardwareSerial gpsSerial(1);
 
 // Baud rate for GPS and correction factor for time update
-#define GPSBaud 9600
-#define CORRECTION_FACTOR 0
+#define GPSBaud 38400
+#define CORRECTION_FACTOR 952788    // 0 - offset: -0.935388 sec, 503900: - offset -0.416567, 939177 - offset: -0.013611, 952788 - offset: 
 
 #define EEPROM_SIZE 1
 
@@ -79,11 +79,12 @@ bool useWiFi = false;
 
 // Decide which configuration to use (here using EEPROM to cycle through boards).
 void selectBoardConfig() {
-  if (!EEPROM.begin(EEPROM_SIZE)) {
-    DEBUG_PRINTLN("Failed to initialize EEPROM.");
-  }
-  int lastTested = EEPROM.read(0);
-  int currentBoard = (lastTested + 1) % numBoards;
+  //if (!EEPROM.begin(EEPROM_SIZE)) {
+  //  DEBUG_PRINTLN("Failed to initialize EEPROM.");
+  //}
+  //int lastTested = EEPROM.read(0);
+  //int currentBoard = (lastTested + 1) % numBoards;
+  int currentBoard = 1;
   currentBoardConfig = boardConfigs[currentBoard];
   DEBUG_PRINT("Selected board: ");
   DEBUG_PRINTLN(currentBoardConfig.boardName);
@@ -224,8 +225,8 @@ void initPPS() {
   unsigned long startTime = millis();
   PPSavailable = false;
   
-  // Increase detection window to 1500 ms, sampling every 1 ms.
-  while (millis() - startTime < 1500) {
+  // Increase detection window to 1 minute, sampling every 1 ms.
+  while (millis() - startTime < 60000) {
     if (digitalRead(currentBoardConfig.ppsPin) == HIGH) {
       PPSavailable = true;
       break;
@@ -238,39 +239,51 @@ void initPPS() {
     attachInterrupt(digitalPinToInterrupt(currentBoardConfig.ppsPin), PPS_ISR, RISING);
     DEBUG_PRINTLN("PPS initialized. Waiting for signal...");
   } else {
-    DEBUG_PRINTLN("PPS signal not detected! Continuing without PPS synchronization.");
+    DEBUG_PRINTLN("PPS signal not detected! Restarting...");
+    ESP.restart();
   }
 }
 
 void initGPS() {
-  DEBUG_PRINTLN("Initializing GPS...");
-  // Use the RX/TX pins from the current board configuration.
-  DEBUG_PRINT("Using GPS RX pin: ");
-  DEBUG_PRINTLN(currentBoardConfig.rxPin);
-  DEBUG_PRINT("Using GPS TX pin: ");
-  DEBUG_PRINTLN(currentBoardConfig.txPin);
-  
-  gpsSerial.begin(GPSBaud, SERIAL_8N1, currentBoardConfig.rxPin, currentBoardConfig.txPin);
-  unsigned long startTime = millis();
-  while (millis() - startTime < 30000) {
-    while (gpsSerial.available()) {
-      gps.encode(gpsSerial.read());
-      if (gps.time.isValid()) {
-        DEBUG_PRINT("GPS time acquired: ");
-        if (gps.time.hour() < 10) DEBUG_PRINT("0");
-        DEBUG_PRINT(gps.time.hour());
-        DEBUG_PRINT(":");
-        if (gps.time.minute() < 10) DEBUG_PRINT("0");
-        DEBUG_PRINT(gps.time.minute());
-        DEBUG_PRINT(":");
-        if (gps.time.second() < 10) DEBUG_PRINT("0");
-        DEBUG_PRINTLN(gps.time.second());
-        return;
+  //while(true) {
+  {
+    DEBUG_PRINTLN("Initializing GPS...");
+    // Use the RX/TX pins from the current board configuration.
+    DEBUG_PRINT("Using GPS RX pin: ");
+    DEBUG_PRINTLN(currentBoardConfig.rxPin);
+    DEBUG_PRINT("Using GPS TX pin: ");
+    DEBUG_PRINTLN(currentBoardConfig.txPin);
+    
+    gpsSerial.begin(GPSBaud, SERIAL_8N1, currentBoardConfig.rxPin, currentBoardConfig.txPin);
+    unsigned long startTime = millis();
+    int incomingByte = 0;
+    while (millis() - startTime < 30000) {
+      while (gpsSerial.available()) {
+        
+        incomingByte = gpsSerial.read();
+        // DEBUG_PRINT("Got from serial port: ");
+        // DEBUG_PRINTLN(incomingByte);
+        gps.encode(incomingByte);
+
+        if (gps.time.isValid()) {
+          DEBUG_PRINT("GPS time acquired: ");
+          if (gps.time.hour() < 10) DEBUG_PRINT("0");
+          DEBUG_PRINT(gps.time.hour());
+          DEBUG_PRINT(":");
+          if (gps.time.minute() < 10) DEBUG_PRINT("0");
+          DEBUG_PRINT(gps.time.minute());
+          DEBUG_PRINT(":");
+          if (gps.time.second() < 10) DEBUG_PRINT("0");
+          DEBUG_PRINTLN(gps.time.second());
+          return;
+        }
       }
+      delay(100);
     }
-    delay(100);
+    // DEBUG_PRINTLN("Failed to acquire valid GPS time, trying again.");
+
+    // delay(5000);
   }
-  DEBUG_PRINTLN("Failed to acquire valid GPS time!");
 }
 
 void readGPSTime() {
@@ -286,14 +299,18 @@ void readGPSTime() {
     timeinfo.tm_min = gps.time.minute();
     timeinfo.tm_sec = gps.time.second();
     time_t unixTime = mktime(&timeinfo) + 1;
-    // If PPS is available, wait for the next PPS signal for precise synchronization.
-    if (PPSavailable) {
-      while (!PPSsignal) {}
-      PPSsignal = false;
-    }
     struct timeval tv;
     tv.tv_sec = unixTime;
     tv.tv_usec = CORRECTION_FACTOR;
+
+    // If PPS is available, wait for the next PPS signal for precise synchronization.
+    if (PPSavailable) {
+      while (!PPSsignal) {
+        // this must be terrible for tying up the esp32's resources, can we yield or do something else here?
+      }
+      PPSsignal = false;
+    }
+
     settimeofday(&tv, NULL);
     DEBUG_CRITICAL_PRINTLN("GPS Time Updated");
   }
@@ -379,15 +396,23 @@ void ntpTask(void *parameter) {
 
 void setup() {
   Serial.begin(115200);
+  DEBUG_PRINTLN("----- start: delay for gps startup -----");
+  // give the gps a chance to start up
+  delay(10000);
+  DEBUG_PRINTLN("----- start: network init -----");
+
   initNetwork();   // Use Ethernet if available; otherwise, fall back to WiFi.
   printMacAddress();  // Print the actual MAC address used.
   initPPS();
   initGPS();
+  DEBUG_PRINTLN("----- start: starting tasks -----");
   gpsMutex = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(gpsTask, "GPSTask", 4096, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(ntpTask, "NTPTask", 4096, NULL, 1, NULL, 1);
+  DEBUG_PRINTLN("----- start: end of start -----");
 }
 
 void loop() {
   // The tasks handle GPS and NTP functionality.
+  delay(10);
 }
