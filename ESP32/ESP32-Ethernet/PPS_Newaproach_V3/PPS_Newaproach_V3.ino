@@ -98,8 +98,8 @@ void selectBoardConfig() {
   DEBUG_PRINTLN(currentBoardConfig.ppsPin);
 
   // Save the configuration index back to EEPROM.
-  EEPROM.write(0, currentBoard);
-  EEPROM.commit();
+  //EEPROM.write(0, currentBoard);
+  //EEPROM.commit();
 }
 
 // Network initialization: if powerPin is valid, attempt Ethernet initialization;
@@ -210,6 +210,7 @@ void printMacAddress() {
 
 // PPS Interrupt Service Routine
 void IRAM_ATTR PPS_ISR() {
+  // save the number of ticks that have passed at the time of the interrupt
   lastPPSMicros = micros();
 }
 
@@ -239,55 +240,71 @@ void initPPS() {
     attachInterrupt(digitalPinToInterrupt(currentBoardConfig.ppsPin), PPS_ISR, RISING);
     DEBUG_PRINTLN("PPS initialized. Waiting for signal...");
   } else {
-    DEBUG_PRINTLN("PPS signal not detected! Restarting...");
+    // time is too unreliable if PPS isn't available - restart until the GPS module starts triggering its PPS
+    DEBUG_PRINTLN("PPS signal not detected! Restarting in 5 seconds...");
+    delay(5000);
     ESP.restart();
   }
 }
 
 void initGPS() {
-  //while(true) {
-  {
-    DEBUG_PRINTLN("Initializing GPS...");
-    // Use the RX/TX pins from the current board configuration.
-    DEBUG_PRINT("Using GPS RX pin: ");
-    DEBUG_PRINTLN(currentBoardConfig.rxPin);
-    DEBUG_PRINT("Using GPS TX pin: ");
-    DEBUG_PRINTLN(currentBoardConfig.txPin);
-    
-    gpsSerial.begin(GPSBaud, SERIAL_8N1, currentBoardConfig.rxPin, currentBoardConfig.txPin);
-    unsigned long startTime = millis();
-    int incomingByte = 0;
-    while (millis() - startTime < 30000) {
-      while (gpsSerial.available()) {
-        
-        incomingByte = gpsSerial.read();
-        // DEBUG_PRINT("Got from serial port: ");
-        // DEBUG_PRINTLN(incomingByte);
-        gps.encode(incomingByte);
+  DEBUG_PRINTLN("Initializing GPS...");
+  // Use the RX/TX pins from the current board configuration.
+  DEBUG_PRINT("Using GPS RX pin: ");
+  DEBUG_PRINTLN(currentBoardConfig.rxPin);
+  DEBUG_PRINT("Using GPS TX pin: ");
+  DEBUG_PRINTLN(currentBoardConfig.txPin);
+  
+  gpsSerial.begin(GPSBaud, SERIAL_8N1, currentBoardConfig.rxPin, currentBoardConfig.txPin);
+  unsigned long startTime = millis();
+  int incomingByte = 0;
+  while (millis() - startTime < 30000) {
+    while (gpsSerial.available()) {
+      
+      incomingByte = gpsSerial.read();
+      gps.encode(incomingByte);
 
-        if (gps.time.isValid()) {
-          DEBUG_PRINT("GPS time acquired: ");
-          if (gps.time.hour() < 10) DEBUG_PRINT("0");
-          DEBUG_PRINT(gps.time.hour());
-          DEBUG_PRINT(":");
-          if (gps.time.minute() < 10) DEBUG_PRINT("0");
-          DEBUG_PRINT(gps.time.minute());
-          DEBUG_PRINT(":");
-          if (gps.time.second() < 10) DEBUG_PRINT("0");
-          DEBUG_PRINTLN(gps.time.second());
-          return;
-        }
+      if (gps.time.isValid()) {
+        DEBUG_PRINT("GPS time acquired: ");
+        if (gps.time.hour() < 10) DEBUG_PRINT("0");
+        DEBUG_PRINT(gps.time.hour());
+        DEBUG_PRINT(":");
+        if (gps.time.minute() < 10) DEBUG_PRINT("0");
+        DEBUG_PRINT(gps.time.minute());
+        DEBUG_PRINT(":");
+        if (gps.time.second() < 10) DEBUG_PRINT("0");
+        DEBUG_PRINTLN(gps.time.second());
+        return;
       }
-      delay(100);
     }
-    // DEBUG_PRINTLN("Failed to acquire valid GPS time, trying again.");
-
-    // delay(5000);
+    delay(100);
   }
 }
 
 void readGPSTime() {
+  // logic: 
+  // each second, the GNNS module will produce a PPS pulse and start 
+  // emitting NMEA strings over its UART. the baud rate is high enough that 
+  // the NMEA strings are all produced within the 1 second (before the next 
+  // second ticks over and new strings need to be produced). the PPS pulse 
+  // is detected by the ESP32-S3 first via the PPS ISR. later on we receive
+  // the NMEA time string from the GNNS module and some time has passed since 
+  // the PPR ISR ran. this amount of time is worked out by taking the
+  // difference between the value of micros() at the time of PPS ISR and
+  // the value of micros() just before we call settimeofday(). we can't do
+  // this perfectly so calculate the difference a little bit ahead of time
+  // and try to do everything else in constant time so we can fix up the 
+  // difference value using CORRECTION_FACTOR. this gives us totalUsec
+  // and that becomes the tv_usec value passed to settimeofday().
+  //
+  // we need to also do some sanity checks because if a "lot" of time has
+  // passed since the PPS ISR ran, or the PPS ISR has run really recently,
+  // the PPS pulse and the NMEA string might be for different seconds
+  // values. if that has occurred then we want to skip processing this GNNS
+  // update and wait for the next update to come through.
+  
   // copy lastPPSMicros as soon as we can in case the PPS ISR runs while we are still running this task
+  // this should really be done in a critical section but it's probably fine to leave it like this
   uint32_t local_lastPPSMicros = lastPPSMicros;
   uint32_t nowMicros = micros();
 
@@ -325,11 +342,15 @@ void readGPSTime() {
     struct timeval tv;
     tv.tv_sec = mktime(&timeinfo);
 
+    uint32_t totalUsecDivOneSec = (totalUsec / 1000000);
+    uint32_t totalUSecModOneSec = (totalUsec % 1000000);
+
     // Check for overflow of totalUsec: greater than or equal to 1 second
     if (totalUsec >= 1000000) {
-        tv.tv_sec += (totalUsec / 1000000); // Add whole seconds to the seconds field
-        tv.tv_usec = (totalUsec % 1000000); // Keep only the remaining microseconds
+        tv.tv_sec += totalUsecDivOneSec; // Add whole seconds to the seconds field
+        tv.tv_usec = totalUSecModOneSec; // Keep only the remaining microseconds
     } else {
+        tv.tv_sec += 0;
         tv.tv_usec = totalUsec;
     }
 
