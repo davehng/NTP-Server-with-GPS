@@ -2,12 +2,10 @@
 #include <TinyGPSPlus.h>
 #include <time.h>
 #include <lwip/def.h>
-#include <lwip/sockets.h>
+#include <lwip/udp.h> 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-
-// --- NEW INCLUDES FOR PRODUCTION FEATURES ---
-#include <esp_task_wdt.h>
+#include <lwip/tcpip.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
 
@@ -26,17 +24,20 @@
 
 // Settings
 #define GPS_BAUD         38400
-#define CORRECTION_US    1210
+#define CORRECTION_US    0
 #define NTP_EPOCH_OFFSET 2208988800UL
 #define NTP_PORT         123
-#define WDT_TIMEOUT      30   // Reboot if frozen for 30 seconds
 
 // --- GLOBALS ---
 TinyGPSPlus gps;
 HardwareSerial gpsSerial(1);
 volatile uint32_t lastPPSMicros = 0;
+// We use volatile to ensure the LwIP callback sees the latest atomic write
 volatile uint32_t lastSyncSec = 0;
 volatile uint32_t lastSyncFrac = 0;
+
+// Raw LwIP Control Block
+struct udp_pcb *ntp_pcb;
 
 typedef struct {
   uint8_t li_vn_mode; uint8_t stratum; uint8_t poll; uint8_t precision;
@@ -60,6 +61,49 @@ void IRAM_ATTR PPS_ISR() {
   lastPPSMicros = micros();
 }
 
+// --- RAW LwIP CALLBACK (Running in TCP/IP Thread) ---
+// This function runs immediately when a packet arrives, bypassing the scheduler.
+void onNtpPacket(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+  if (p == NULL) return;
+
+  // 1. TIMESTAMP IMMEDIATELY (Critical Path)
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+
+  // 2. Validate Packet Size (NTP is 48 bytes)
+  if (p->tot_len >= sizeof(ntp_packet_t)) {
+    // Access payload directly (Zero Copy)
+    ntp_packet_t *pkt = (ntp_packet_t *)p->payload;
+
+    // 3. Prepare Timestamps
+    uint32_t s = htonl(tv.tv_sec + NTP_EPOCH_OFFSET);
+    uint32_t f = htonl((uint32_t)((double)tv.tv_usec * 4294.967296)); 
+
+    // 4. Update Packet in Place
+    pkt->li_vn_mode = 0x24; // Server, Stratum 1
+    pkt->stratum = 1;
+    pkt->refId = htonl(0x47505300); // "GPS"
+    
+    // Copy reference time (atomic read from globals)
+    pkt->refTm_s = lastSyncSec;
+    pkt->refTm_f = lastSyncFrac;
+    
+    // Originate = Client's Transmit Time
+    pkt->origTm_s = pkt->txTm_s; 
+    pkt->origTm_f = pkt->txTm_f;
+    
+    // RX and TX times are effectively "now"
+    pkt->rxTm_s = s; pkt->rxTm_f = f;
+    pkt->txTm_s = s; pkt->txTm_f = f;
+
+    // 5. Send Response (Reflect the buffer back)
+    udp_sendto(pcb, p, addr, port);
+  }
+
+  // 6. Free the buffer (LwIP requires this)
+  pbuf_free(p);
+}
+
 // --- INIT ---
 void initNetwork() {
   pinMode(ETH_POWER_PIN, OUTPUT);
@@ -70,7 +114,6 @@ void initNetwork() {
     fatalError("Ethernet PHY failed to start");
   }
 
-  // Timeout recovery for DHCP
   unsigned long start = millis();
   while (ETH.localIP() == IPAddress(0,0,0,0)) { 
     if (millis() - start > 30000) fatalError("DHCP Timeout");
@@ -79,40 +122,46 @@ void initNetwork() {
   Serial.print("IP: "); Serial.println(ETH.localIP());
 }
 
-void initOTA() {
-  ArduinoOTA.setHostname("Stratum1-NTP-Server");
+void initRawNTP() {
+ // CRITICAL: Lock the TCP/IP core before calling Raw API functions
+  LOCK_TCPIP_CORE();
   
-  // Optional: Set password for updates
-  // ArduinoOTA.setPassword("admin"); 
+   // Create a new UDP Control Block
+  ntp_pcb = udp_new();
+  if (!ntp_pcb) fatalError("Could not create UDP PCB");
 
+  // Bind to port 123
+  if (udp_bind(ntp_pcb, IP_ADDR_ANY, NTP_PORT) != ERR_OK) {
+    fatalError("Could not bind UDP PCB");
+  }
+
+  // Register the callback function
+  udp_recv(ntp_pcb, onNtpPacket, NULL);
+  
+  // CRITICAL: Unlock when done
+  UNLOCK_TCPIP_CORE();
+  
+  Serial.println("Raw NTP Callback registered.");
+}
+
+void initOTA() {
+  ArduinoOTA.setHostname("gpsclock");
+  ArduinoOTA.setPassword("uploadota");
   ArduinoOTA.onStart([]() {
     Serial.println("Start updating...");
-    // Detach interrupt to prevent crashes during flash write
+    // Stop interrupts to prevent crashes during flash write
     detachInterrupt(digitalPinToInterrupt(PPS_PIN));
   });
-  
   ArduinoOTA.onEnd([]() { Serial.println("\nEnd"); });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
   });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-    else if (error == OTA_END_ERROR) Serial.println("End Failed");
-    ESP.restart();
-  });
-
+  ArduinoOTA.onError([](ota_error_t error) { ESP.restart(); });
   ArduinoOTA.begin();
 }
 
 // --- TASKS ---
 void readGPSTime() {
-  // 1. REGISTER WATCHDOG (Protect against GPS hardware hang)
-  esp_task_wdt_add(NULL);
-
   uint32_t localPPS = lastPPSMicros;
   uint32_t nowMicros = micros();
   static int previousSecond = -1;
@@ -127,7 +176,6 @@ void readGPSTime() {
     uint32_t delta = nowMicros - localPPS;
     if (delta > 900000 || delta < 1000) return; 
 
-    // Blink LED to indicate "Pulse Valid"
     static bool ledState = false;
     digitalWrite(STATUS_LED_PIN, ledState = !ledState);
 
@@ -162,56 +210,6 @@ void readGPSTime() {
     lastSyncSec  = htonl(gpsSecs + NTP_EPOCH_OFFSET);
     lastSyncFrac = htonl((uint32_t)((double)(delta + CORRECTION_US) * 4294.967296));
   }
-  
-  // 2. KICK THE DOG (Tell hardware we are still alive)
-  esp_task_wdt_reset();
-}
-
-void ntpTask(void *parameter) {
-  int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-  if (sock < 0) fatalError("Unable to create socket");
-
-  struct sockaddr_in server_addr;
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_port = htons(NTP_PORT);
-  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-
-  if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-    fatalError("Unable to bind to port 123");
-  }
-
-  while (1) {
-    ntp_packet_t packet;
-    struct sockaddr_in source_addr;
-    socklen_t addrLen = sizeof(source_addr);
-
-    memset(&packet, 0, sizeof(ntp_packet_t));
-
-    int len = recvfrom(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&source_addr, &addrLen);
-
-    if (len == sizeof(ntp_packet_t)) {
-      struct timeval tv;
-      gettimeofday(&tv, NULL);
-      
-      uint32_t s = htonl(tv.tv_sec + NTP_EPOCH_OFFSET);
-      uint32_t f = htonl((uint32_t)((double)tv.tv_usec * 4294.967296)); 
-
-      packet.li_vn_mode = 0x24; 
-      packet.stratum = 1;
-      packet.refId = htonl(0x47505300); // "GPS"
-      packet.refTm_s = lastSyncSec;
-      packet.refTm_f = lastSyncFrac;
-      packet.origTm_s = packet.txTm_s; 
-      packet.origTm_f = packet.txTm_f;
-      packet.rxTm_s = s; packet.rxTm_f = f;
-      packet.txTm_s = s; packet.txTm_f = f;
-
-      sendto(sock, &packet, sizeof(packet), 0, (struct sockaddr *)&source_addr, addrLen);
-    } 
-    else if (len < 0 && errno != EAGAIN && errno != EINTR) {
-       fatalError("Socket crashed");
-    }
-  }
 }
 
 void gpsTask(void *p) { 
@@ -224,34 +222,33 @@ void gpsTask(void *p) {
 void setup() {
   setCpuFrequencyMhz(240);
   Serial.begin(115200);
-  
-  // 1. INIT WATCHDOG (Must happen early)
-  esp_task_wdt_config_t wdt_config = {
-      .timeout_ms = WDT_TIMEOUT * 1000,  // Convert seconds to ms
-      .idle_core_mask = (1 << 0) | (1 << 1), // Watch both Core 0 and Core 1
-      .trigger_panic = true              // Reset on timeout
-  };
-  esp_task_wdt_init(&wdt_config);
-  esp_task_wdt_add(NULL);               // Watch the current task (setup/loop)
 
+  Serial.println("----- start: delay for gps startup -----");
+  delay(10000);
+
+  Serial.println("----- start: gps init -----");
   pinMode(STATUS_LED_PIN, OUTPUT);
   gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
   pinMode(PPS_PIN, INPUT);
   attachInterrupt(digitalPinToInterrupt(PPS_PIN), PPS_ISR, RISING);
   
+  Serial.println("----- start: network init -----");
   initNetwork();
-  initOTA(); // Start Over-The-Air updater
 
+  Serial.println("----- start: ota init -----");
+  initOTA();
+  
+  Serial.println("----- start: ntp callback init -----");
+  // Initialize the Raw LwIP Callback (Replaces ntpTask)
+  initRawNTP();
+
+  Serial.println("----- start: start gps task -----");
   xTaskCreatePinnedToCore(gpsTask, "GPS", 4096, NULL, 2, NULL, 1);
-  xTaskCreatePinnedToCore(ntpTask, "NTP", 4096, NULL, 20, NULL, 1);
+
+  Serial.println("----- start: complete -----");
 }
 
 void loop() { 
-  // Handle OTA updates
   ArduinoOTA.handle(); 
-  
-  // Feed the watchdog for the main loop
-  esp_task_wdt_reset();
-  
   delay(100); 
 }
