@@ -37,6 +37,7 @@ WiFiUDP udp;
 
 volatile bool PPSavailable = false;
 volatile uint32_t lastPPSMicros = 0;
+uint8_t lastSecond = 61;
 
 HardwareSerial gpsSerial(1);
 
@@ -337,6 +338,27 @@ void readGPSTime() {
     timeinfo.tm_min = gps.time.minute();
     timeinfo.tm_sec = gps.time.second();
 
+    if (timeinfo.tm_sec == lastSecond) {
+      // this task does get re-entered multiple times per second (e.g. 
+      // multiple NMEA messages from the GNNS). we don't want to update 
+      // that frequently, so only continue if we haven't updated the clock
+      // for the current GNNS second.
+      DEBUG_CRITICAL_PRINT("Already updated for ");
+      DEBUG_CRITICAL_PRINT(lastSecond);
+      DEBUG_CRITICAL_PRINTLN(", skipping update");
+      return;
+    }
+
+    lastSecond = timeinfo.tm_sec;
+
+    // only update the local time every 5 seconds - updating more frequently
+    // just increases jitter with no benefit. need to allow time for the clock
+    // to slew if we have previously asked for an adjustment.
+    if (lastSecond % 5 != 0) {
+      DEBUG_CRITICAL_PRINTLN("Skipping update as not a 5 second interval");
+      return;
+    }
+
     time_t gpsSecs = mktime(&timeinfo);
     struct timeval now;
     gettimeofday(&now, NULL);
@@ -361,8 +383,8 @@ void readGPSTime() {
     }
 
     // Use a threshold for "harsh" vs "gradual" updates
-    // If the offset is greater than 1 second, do a hard set.
-    if (abs(adj.tv_sec) >= 1) {
+    // If the offset is greater than 2 seconds, do a hard set.
+    if (abs(adj.tv_sec) >= 2) {
         struct timeval tv;
         tv.tv_sec = gpsSecs;
         tv.tv_usec = microsecondsSincePulse + CORRECTION_FACTOR;
@@ -374,13 +396,19 @@ void readGPSTime() {
         }
         
         settimeofday(&tv, NULL);
-        DEBUG_CRITICAL_PRINTLN("Large offset: Hard sync performed.");
+        DEBUG_CRITICAL_PRINT("Large offset: Hard sync performed as delta is ");
+        DEBUG_CRITICAL_PRINT(adj.tv_sec);
+        DEBUG_CRITICAL_PRINT(" sec, ");
+        DEBUG_CRITICAL_PRINT(adj.tv_usec);
+        DEBUG_CRITICAL_PRINTLN(" usec");
     } else {
         // Small offset: Slew the clock gradually
         adjtime(&adj, NULL); 
         DEBUG_CRITICAL_PRINT("Small offset: Slewing clock by ");
+        DEBUG_CRITICAL_PRINT(adj.tv_sec);
+        DEBUG_CRITICAL_PRINT(" sec, ");
         DEBUG_CRITICAL_PRINT(adj.tv_usec);
-        DEBUG_CRITICAL_PRINTLN(" us");
+        DEBUG_CRITICAL_PRINTLN(" usec.");
     }
   }
 }
