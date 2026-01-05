@@ -337,29 +337,51 @@ void readGPSTime() {
     timeinfo.tm_min = gps.time.minute();
     timeinfo.tm_sec = gps.time.second();
 
-    uint32_t totalUsec = microsecondsSincePulse + CORRECTION_FACTOR;
+    time_t gpsSecs = mktime(&timeinfo);
+    struct timeval now;
+    gettimeofday(&now, NULL);
 
-    struct timeval tv;
-    tv.tv_sec = mktime(&timeinfo);
+    // Calculate the difference between current system time and GPS time
+    long diff_sec = gpsSecs - now.tv_sec;
+    long diff_usec = (microsecondsSincePulse + CORRECTION_FACTOR) - now.tv_usec;
 
-    uint32_t totalUsecDivOneSec = (totalUsec / 1000000);
-    uint32_t totalUSecModOneSec = (totalUsec % 1000000);
+    struct timeval adj;
+    adj.tv_sec = diff_sec;
+    adj.tv_usec = diff_usec;
 
-    // Check for overflow of totalUsec: greater than or equal to 1 second
-    if (totalUsec >= 1000000) {
-        tv.tv_sec += totalUsecDivOneSec; // Add whole seconds to the seconds field
-        tv.tv_usec = totalUSecModOneSec; // Keep only the remaining microseconds
-    } else {
-        tv.tv_sec += 0;
-        tv.tv_usec = totalUsec;
+    // Normalize adj structure (ensure usec is between 0 and 999,999)
+    while (adj.tv_usec >= 1000000) { 
+      adj.tv_sec++; 
+      adj.tv_usec -= 1000000; 
+    }
+    
+    while (adj.tv_usec < 0) { 
+      adj.tv_sec--; 
+      adj.tv_usec += 1000000; 
     }
 
-    settimeofday(&tv, NULL);
-
-    DEBUG_CRITICAL_PRINT("GPS sync: ");
-    DEBUG_CRITICAL_PRINT(tv.tv_sec);
-    DEBUG_CRITICAL_PRINT(".");
-    DEBUG_CRITICAL_PRINT(tv.tv_usec);
+    // Use a threshold for "harsh" vs "gradual" updates
+    // If the offset is greater than 1 second, do a hard set.
+    if (abs(adj.tv_sec) >= 1) {
+        struct timeval tv;
+        tv.tv_sec = gpsSecs;
+        tv.tv_usec = microsecondsSincePulse + CORRECTION_FACTOR;
+        
+        // Normalizing tv
+        if (tv.tv_usec >= 1000000) { 
+          tv.tv_sec += (tv.tv_usec / 1000000); 
+          tv.tv_usec %= 1000000; 
+        }
+        
+        settimeofday(&tv, NULL);
+        DEBUG_CRITICAL_PRINTLN("Large offset: Hard sync performed.");
+    } else {
+        // Small offset: Slew the clock gradually
+        adjtime(&adj, NULL); 
+        DEBUG_CRITICAL_PRINT("Small offset: Slewing clock by ");
+        DEBUG_CRITICAL_PRINT(adj.tv_usec);
+        DEBUG_CRITICAL_PRINTLN(" us");
+    }
   }
 }
 
