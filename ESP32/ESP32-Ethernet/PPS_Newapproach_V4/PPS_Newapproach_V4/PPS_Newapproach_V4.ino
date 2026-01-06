@@ -24,7 +24,7 @@
 
 // Settings
 #define GPS_BAUD         38400
-#define CORRECTION_US    0
+#define CORRECTION_US    50
 #define NTP_EPOCH_OFFSET 2208988800UL
 #define NTP_PORT         123
 
