@@ -4,8 +4,8 @@
 
 Take a look at ESP32/ESP32-Ethernet/PPS_Newapproach_V4/PPS_Newapproach_V4.ino. This is rewritten code that was assisted by Gemini 3 Pro (it required a lot of prompting direction, checking, and testing).
 
-* Low latency (responds quickly to NTP requests)
-* Low jitter (requests to slew the clock where reasonable instead of making hard time jumps).
+* Low latency (responds quickly to NTP requests). In my testing delay is < 1ms.
+* Low jitter (requests to slew the clock where reasonable instead of making hard time jumps). In my testing jitter is < 0.2ms.
 * Enables Arduino OTA
 * Configuration is only for a WT32-ETH01 module with a Quescan M10050 M10 GNSS receiver in default settings (38400 baud, 1hz PPS).
 
