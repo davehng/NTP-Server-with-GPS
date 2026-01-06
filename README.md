@@ -9,6 +9,9 @@ Take a look at ESP32/ESP32-Ethernet/PPS_Newapproach_V4/PPS_Newapproach_V4.ino. T
 * Enables Arduino OTA
 * Configuration is only for a WT32-ETH01 module with a Quescan M10050 M10 GNSS receiver in default settings (38400 baud, 1hz PPS).
 
+Todos:
+* Set up a watchdog
+
 ## Original readme
 
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
