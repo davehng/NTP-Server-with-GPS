@@ -1,5 +1,16 @@
 # NTP Server with GPS
 
+## Changes from forked source
+
+Take a look at ESP32/ESP32-Ethernet/PPS_Newapproach_V4/PPS_Newapproach_V4.ino. This is rewritten code that was done with the assistance of Gemini 3 Pro.
+
+* Low latency (responds quickly to NTP requests)
+* Low jitter (requests to slew the clock where reasonable instead of making hard time jumps).
+* Enables Arduino OTA
+* Configuration is only for a WT32-ETH01 module with a Quescan M10050 M10 GNSS receiver in default settings (38400 baud, 1hz PPS).
+
+## Original readme
+
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/SensorsIot/NTP-Server-with-GPS)](https://github.com/SensorsIot/NTP-Server-with-GPS/stargazers)
 [![YouTube](https://img.shields.io/badge/YouTube-Video-red?logo=youtube)](https://youtu.be/BGb2t5FT-zw)
