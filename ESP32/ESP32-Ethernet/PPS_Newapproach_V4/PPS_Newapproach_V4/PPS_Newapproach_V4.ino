@@ -10,7 +10,9 @@
 #include <ESPmDNS.h>
 
 // --- CONFIGURATION ---
-// Pins (WT32-ETH01)
+// this code assumes that we're always using a WT32-ETH01 module
+//
+// Pins:
 #define GPS_RX_PIN       15
 #define GPS_TX_PIN       4
 #define PPS_PIN          2
@@ -20,11 +22,11 @@
 #define ETH_MDIO_PIN     18
 #define ETH_TYPE         ETH_PHY_LAN8720
 #define ETH_CLK_MODE     ETH_CLOCK_GPIO0_IN
-#define STATUS_LED_PIN   33 
+#define STATUS_LED_PIN   33           // TODO - there isn't a status PIN on the board so just map to GPIO33 for now
 
 // Settings
-#define GPS_BAUD         38400
-#define CORRECTION_US    700
+#define GPS_BAUD         38400        // for a QUESCAN M10050 M10 GNNS receiver in default configuration (38400 baud, 1hz PPS)
+#define CORRECTION_US    700          // this value may need tuning in your own setup
 #define NTP_EPOCH_OFFSET 2208988800UL
 #define NTP_PORT         123
 
@@ -39,13 +41,23 @@ volatile uint32_t lastSyncFrac = 0;
 // Raw LwIP Control Block
 struct udp_pcb *ntp_pcb;
 
+// ntp packet
 typedef struct {
-  uint8_t li_vn_mode; uint8_t stratum; uint8_t poll; uint8_t precision;
-  uint32_t rootDelay; uint32_t rootDispersion; uint32_t refId;
-  uint32_t refTm_s; uint32_t refTm_f;
-  uint32_t origTm_s; uint32_t origTm_f;
-  uint32_t rxTm_s; uint32_t rxTm_f;
-  uint32_t txTm_s; uint32_t txTm_f;
+  uint8_t li_vn_mode; 
+  uint8_t stratum; 
+  uint8_t poll; 
+  uint8_t precision;
+  uint32_t rootDelay; 
+  uint32_t rootDispersion; 
+  uint32_t refId;
+  uint32_t refTm_s; 
+  uint32_t refTm_f;
+  uint32_t origTm_s; 
+  uint32_t origTm_f;
+  uint32_t rxTm_s; 
+  uint32_t rxTm_f;
+  uint32_t txTm_s; 
+  uint32_t txTm_f;
 } ntp_packet_t;
 
 // --- ERROR RECOVERY ---
@@ -63,6 +75,7 @@ void IRAM_ATTR PPS_ISR() {
 
 // --- RAW LwIP CALLBACK (Running in TCP/IP Thread) ---
 // This function runs immediately when a packet arrives, bypassing the scheduler.
+// It reduces jitter as we don't have to wait (an inconsistent amount of time) for the scheduler to run our task.
 void onNtpPacket(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
   if (p == NULL) return;
 
@@ -106,9 +119,12 @@ void onNtpPacket(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t
 
 // --- INIT ---
 void initNetwork() {
+  // power cycle ethernet
   pinMode(ETH_POWER_PIN, OUTPUT);
-  digitalWrite(ETH_POWER_PIN, LOW); delay(100);
-  digitalWrite(ETH_POWER_PIN, HIGH); delay(100);
+  digitalWrite(ETH_POWER_PIN, LOW); 
+  delay(100);
+  digitalWrite(ETH_POWER_PIN, HIGH); 
+  delay(100);
   
   if (!ETH.begin(ETH_TYPE, ETH_ADDR, ETH_MDC_PIN, ETH_MDIO_PIN, ETH_POWER_PIN, ETH_CLK_MODE)) {
     fatalError("Ethernet PHY failed to start");
@@ -119,7 +135,8 @@ void initNetwork() {
     if (millis() - start > 30000) fatalError("DHCP Timeout");
     delay(500); 
   }
-  Serial.print("IP: "); Serial.println(ETH.localIP());
+  Serial.print("IP: "); 
+  Serial.println(ETH.localIP());
 }
 
 void initRawNTP() {
@@ -128,7 +145,9 @@ void initRawNTP() {
   
    // Create a new UDP Control Block
   ntp_pcb = udp_new();
-  if (!ntp_pcb) fatalError("Could not create UDP PCB");
+  if (!ntp_pcb) { 
+    fatalError("Could not create UDP PCB");
+  }
 
   // Bind to port 123
   if (udp_bind(ntp_pcb, IP_ADDR_ANY, NTP_PORT) != ERR_OK) {
@@ -152,11 +171,15 @@ void initOTA() {
     // Stop interrupts to prevent crashes during flash write
     detachInterrupt(digitalPinToInterrupt(PPS_PIN));
   });
-  ArduinoOTA.onEnd([]() { Serial.println("\nEnd"); });
+  ArduinoOTA.onEnd([]() { 
+    Serial.println("\nEnd"); 
+  });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
     Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
   });
-  ArduinoOTA.onError([](ota_error_t error) { ESP.restart(); });
+  ArduinoOTA.onError([](ota_error_t error) { 
+    ESP.restart(); 
+  });
   ArduinoOTA.begin();
 }
 
@@ -170,11 +193,24 @@ void readGPSTime() {
 
   if (gps.time.isUpdated() && gps.time.isValid()) {
     int currentSecond = gps.time.second();
-    if (currentSecond == previousSecond) return;
+    
+    if (currentSecond == previousSecond) { 
+      // we've already seen a NMEA message for this second, don't process any more updates
+      return; 
+    }
+
     previousSecond = currentSecond;
 
     uint32_t delta = nowMicros - localPPS;
-    if (delta > 900000 || delta < 1000) return; 
+    if (delta > 900000 || delta < 1000) { 
+      // "one-second" guard: GPS sentences usually arrive 200-500ms AFTER the PPS pulse.
+      // If microsecondsSincePulse is very large (e.g., > 900ms), we are likely looking at 
+      // an old PPS pulse from the PREVIOUS second. If it's very small (e.g., < 10ms), the
+      // PPS for the NEXT second might have just fired before we parsed the data for the
+      // current second. If we detect either of these situations, skip processing. This
+      // means we only process when in a reasonable time window from the PPS pulse.
+      return; 
+    }
 
     static bool ledState = false;
     digitalWrite(STATUS_LED_PIN, ledState = !ledState);
@@ -195,10 +231,15 @@ void readGPSTime() {
     adj.tv_sec  = gpsSecs - now.tv_sec;
     adj.tv_usec = (delta + CORRECTION_US) - now.tv_usec;
 
+    // ensure that tv_usec is under 1000000
     adj.tv_sec  += adj.tv_usec / 1000000;
     adj.tv_usec %= 1000000;
-    if (adj.tv_usec < 0) { adj.tv_usec += 1000000; adj.tv_sec--; }
+    if (adj.tv_usec < 0) { 
+      adj.tv_usec += 1000000; adj.tv_sec--; 
+    }
 
+    // decide if we do a hard set because the difference between GNSS and system
+    // clock is too high, or we slew the clock because the difference was low.
     if (abs(adj.tv_sec) >= 2) {
        struct timeval tv = { .tv_sec = gpsSecs, .tv_usec = delta + CORRECTION_US };
        tv.tv_sec += tv.tv_usec / 1000000; tv.tv_usec %= 1000000;
@@ -220,6 +261,7 @@ void gpsTask(void *p) {
 }
 
 void setup() {
+  // force max frequency so the cpu doesn't autoscale
   setCpuFrequencyMhz(240);
   Serial.begin(115200);
 
@@ -239,7 +281,6 @@ void setup() {
   initOTA();
   
   Serial.println("----- start: ntp callback init -----");
-  // Initialize the Raw LwIP Callback (Replaces ntpTask)
   initRawNTP();
 
   Serial.println("----- start: start gps task -----");
