@@ -201,6 +201,9 @@ void readGPSTime() {
 
     previousSecond = currentSecond;
 
+    // todo: consider if we update every 5 or 10 seconds so we give the system clock a 
+    // chance to incorpoate slews that we had previously asked it to do?
+
     uint32_t delta = nowMicros - localPPS;
     if (delta > 900000 || delta < 1000) { 
       // "one-second" guard: GPS sentences usually arrive 200-500ms AFTER the PPS pulse.
