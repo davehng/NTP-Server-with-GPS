@@ -2,7 +2,7 @@
 
 ## Changes from forked source
 
-Take a look at ESP32/ESP32-Ethernet/PPS_Newapproach_V4/PPS_Newapproach_V4.ino. This is rewritten code that was done with the assistance of Gemini 3 Pro.
+Take a look at ESP32/ESP32-Ethernet/PPS_Newapproach_V4/PPS_Newapproach_V4.ino. This is rewritten code that was assisted by Gemini 3 Pro (it required a lot of prompting direction, checking, and testing).
 
 * Low latency (responds quickly to NTP requests)
 * Low jitter (requests to slew the clock where reasonable instead of making hard time jumps).
